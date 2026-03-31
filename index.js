@@ -51,46 +51,32 @@ const row = new ActionRowBuilder().addComponents(
 );
 
 // ===== Helper =====
-async function getUser(userId) {
-  let user = await User.findOne({ userId });
-  if (!user) {
-    user = new User({ userId });
-    await user.save();
-  }
-  return user;
-}
-
 function isAdmin(member) {
   return member.permissions.has('Administrator');
 }
 
 // ===== PANEL =====
 async function sendPanel(channel) {
-  try {
-    const filePath = path.join(__dirname, 'assets', 'design.gif');
+  const filePath = path.join(__dirname, 'assets', 'design.gif');
 
-    if (!fs.existsSync(filePath)) {
-      return channel.send("❌ GIF not found");
-    }
-
-    const attachment = new AttachmentBuilder(filePath);
-
-    const embed = new EmbedBuilder()
-      .setColor(0x0099FF)
-      .setTitle("Fury Management System")
-      .setDescription("Click **IN** to start the timer. Must click every 30 min.")
-      .setImage('attachment://design.gif')
-      .setFooter({ text: "Fury RP" });
-
-    await channel.send({
-      embeds: [embed],
-      files: [attachment],
-      components: [row]
-    });
-
-  } catch (err) {
-    console.error(err);
+  if (!fs.existsSync(filePath)) {
+    return channel.send("❌ GIF not found");
   }
+
+  const attachment = new AttachmentBuilder(filePath);
+
+  const embed = new EmbedBuilder()
+    .setColor(0x0099FF)
+    .setTitle("Fury Management System")
+    .setDescription("Click **IN** to start the timer. Must click every 30 min.")
+    .setImage('attachment://design.gif')
+    .setFooter({ text: "Fury RP" });
+
+  await channel.send({
+    embeds: [embed],
+    files: [attachment],
+    components: [row]
+  });
 }
 
 // ===== MESSAGE HANDLER =====
@@ -128,7 +114,7 @@ client.on('messageCreate', async msg => {
     return msg.reply("✅ All points reset!");
   }
 
-  // ADD POINTS
+  // ADD POINTS (FIXED)
   if (msg.content.startsWith('!addpoints')) {
     if (!isAdmin(msg.member)) return;
 
@@ -139,20 +125,16 @@ client.on('messageCreate', async msg => {
       return msg.reply('Usage: !addpoints @user 50');
     }
 
-    let user = await User.findOne({ userId: mention.id });
-
-    if (!user) {
-      user = new User({ userId: mention.id, total: points });
-    } else {
-      user.total += points;
-    }
-
-    await user.save();
+    await User.updateOne(
+      { userId: mention.id },
+      { $inc: { total: points } },
+      { upsert: true }
+    );
 
     return msg.reply(`✅ Added ${points} points to <@${mention.id}>`);
   }
 
-  // REMOVE POINTS
+  // REMOVE POINTS (FIXED)
   if (msg.content.startsWith('!removepoints')) {
     if (!isAdmin(msg.member)) return;
 
@@ -163,17 +145,15 @@ client.on('messageCreate', async msg => {
       return msg.reply('Usage: !removepoints @user 50');
     }
 
-    let user = await User.findOne({ userId: mention.id });
-
-    if (!user) return msg.reply('❌ User not found');
-
-    user.total = Math.max(0, user.total - points);
-    await user.save();
+    await User.updateOne(
+      { userId: mention.id },
+      { $inc: { total: -points } }
+    );
 
     return msg.reply(`➖ Removed ${points} points from <@${mention.id}>`);
   }
 
-  // SET POINTS
+  // SET POINTS (FIXED)
   if (msg.content.startsWith('!setpoints')) {
     if (!isAdmin(msg.member)) return;
 
@@ -184,15 +164,11 @@ client.on('messageCreate', async msg => {
       return msg.reply('Usage: !setpoints @user 50');
     }
 
-    let user = await User.findOne({ userId: mention.id });
-
-    if (!user) {
-      user = new User({ userId: mention.id, total: points });
-    } else {
-      user.total = points;
-    }
-
-    await user.save();
+    await User.updateOne(
+      { userId: mention.id },
+      { $set: { total: points } },
+      { upsert: true }
+    );
 
     return msg.reply(`🎯 Set <@${mention.id}> points to ${points}`);
   }
@@ -223,7 +199,6 @@ client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isButton()) return;
 
   const userId = interaction.user.id;
-  let user = await getUser(userId);
 
   const member = interaction.guild.members.cache.get(userId);
   const inAssist = member?.voice.channelId && ASSIST_CHANNELS.includes(member.voice.channelId);
@@ -233,25 +208,20 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.customId === 'in') {
-    if (user.active) {
-      return interaction.reply({ content: '⚠️ Already IN', ephemeral: true });
-    }
-
-    user.active = true;
-    user.lastClick = Date.now();
-    await user.save();
+    await User.updateOne(
+      { userId },
+      { $set: { active: true, lastClick: Date.now() } },
+      { upsert: true }
+    );
 
     return interaction.reply({ content: '✅ Signed IN', ephemeral: true });
   }
 
   if (interaction.customId === 'out') {
-    if (!user.active) {
-      return interaction.reply({ content: '⚠️ Not IN', ephemeral: true });
-    }
-
-    user.active = false;
-    user.lastClick = 0;
-    await user.save();
+    await User.updateOne(
+      { userId },
+      { $set: { active: false, lastClick: 0 } }
+    );
 
     return interaction.reply({ content: '⛔ Signed OUT', ephemeral: true });
   }
@@ -275,14 +245,17 @@ setInterval(async () => {
     const inAssist = ASSIST_CHANNELS.includes(member.voice.channelId);
 
     if (!inAssist || member.voice.selfDeaf || now - user.lastClick > 30 * 60 * 1000) {
-      user.active = false;
-      user.lastClick = 0;
-      await user.save();
+      await User.updateOne(
+        { userId: user.userId },
+        { $set: { active: false, lastClick: 0 } }
+      );
       continue;
     }
 
-    user.total += 1;
-    await user.save();
+    await User.updateOne(
+      { userId: user.userId },
+      { $inc: { total: 1 } }
+    );
   }
 
   console.log("✅ Timer loop ran");
