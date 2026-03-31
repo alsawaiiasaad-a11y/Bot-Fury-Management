@@ -1,376 +1,183 @@
-<<<<<<< HEAD
+// index.js
 require('dotenv').config();
-
-const { 
-  Client, 
-  GatewayIntentBits, 
-  ActionRowBuilder, 
-  ButtonBuilder, 
-  ButtonStyle, 
-  Events, 
-  EmbedBuilder, 
-  AttachmentBuilder 
-} = require('discord.js');
+const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, Events, EmbedBuilder, AttachmentBuilder } = require('discord.js');
+const mongoose = require('mongoose');
 const fs = require('fs');
+const path = require('path');
 
-const client = new Client({ 
+// ===== MongoDB Setup =====
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log('✅ MongoDB connected'))
+  .catch(err => console.error('❌ MongoDB connection error:', err));
+
+// ===== User Schema =====
+const userSchema = new mongoose.Schema({
+  userId: { type: String, required: true, unique: true },
+  total: { type: Number, default: 0 },
+  active: { type: Boolean, default: false },
+  lastClick: { type: Number, default: 0 }
+});
+const User = mongoose.model('User', userSchema);
+
+// ===== Discord Client =====
+const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent
-  ] 
+  ]
 });
 
 const TOKEN = process.env.TOKEN;
-const ASSIST_CHANNELS = process.env.ASSIST_CHANNELS.split(',');
+const ASSIST_CHANNELS = (process.env.ASSIST_CHANNELS || '').split(',').filter(Boolean);
 
-// Ensure data.json exists
-if (!fs.existsSync('data.json')) fs.writeFileSync('data.json', '{}');
-let data = JSON.parse(fs.readFileSync('data.json'));
-
-// Buttons
+// ===== Buttons =====
 const row = new ActionRowBuilder().addComponents(
   new ButtonBuilder().setCustomId('in').setLabel('IN').setStyle(ButtonStyle.Success),
   new ButtonBuilder().setCustomId('out').setLabel('OUT').setStyle(ButtonStyle.Danger)
 );
 
-// ----- COMMANDS -----
-client.on('messageCreate', async (msg) => {
-  if (!msg.guild) return;
+// ===== Helper: Get or Create User =====
+async function getUser(userId) {
+  let user = await User.findOne({ userId });
+  if (!user) {
+    user = new User({ userId });
+    await user.save();
+  }
+  return user;
+}
 
-  // Panel
-  if (msg.content === '!panel') {
-    const file = new AttachmentBuilder('./assets/design.gif');
+// ===== PANEL =====
+async function sendPanel(channel) {
+  try {
+    const filePath = path.join(__dirname, 'assets', 'design.gif');
+    if (!fs.existsSync(filePath)) return channel.send("❌ GIF not found");
+
+    const attachment = new AttachmentBuilder(filePath);
     const embed = new EmbedBuilder()
       .setColor(0x0099FF)
       .setTitle("Fury Management System")
-      .setDescription("Click (IN) to start the timer. Must click every 30 min. Deafened users cannot click IN.")
+      .setDescription("Click **IN** to start the timer. Must click every 30 min.")
       .setImage('attachment://design.gif')
       .setFooter({ text: "Fury RP" });
 
-    msg.channel.send({ embeds: [embed], files: [file], components: [row] });
+    await channel.send({ embeds: [embed], files: [attachment], components: [row] });
+  } catch (err) {
+    console.error(err);
   }
+}
 
-  // Leaderboard
+// ===== MESSAGE HANDLER =====
+client.on('messageCreate', async msg => {
+  if (!msg.guild || msg.author.bot) return;
+
+  if (msg.content === '!panel') return sendPanel(msg.channel);
+
   if (msg.content === '!leaderboard') {
-    const sorted = Object.entries(data).sort((a,b)=>b[1].total-a[1].total);
-    let description = sorted.length ? '' : 'No leaderboard data yet!';
-    for (let i=0;i<sorted.length;i++){
-      const userId = sorted[i][0];
-      const points = sorted[i][1].total;
-      description += `**${i+1}.** <@${userId}> — **${points} points**\n`;
-    }
+    const users = await User.find().sort({ total: -1 }).limit(50); // top 50
+    let desc = users.length ? '' : 'No leaderboard data yet!';
+    users.forEach((u, i) => {
+      desc += `**${i + 1}.** <@${u.userId}> — **${u.total} points**\n`;
+    });
 
-    msg.channel.send({
-      embeds:[new EmbedBuilder()
-        .setColor(0xFFD700)
-        .setTitle('🏆 Fury Leaderboard (1 point = 5min)')
-        .setDescription(description)
-        .setFooter({ text: 'Fury Management System' })
-        .setTimestamp()
+    await msg.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xFFD700)
+          .setTitle('🏆 Fury Leaderboard')
+          .setDescription(desc)
       ]
     });
   }
 
-  // Reset points
   if (msg.content === '!resetpoints') {
-    for (const userId in data) data[userId].total = 0;
-    fs.writeFileSync('data.json', JSON.stringify(data,null,2));
-    msg.channel.send({
-      embeds:[new EmbedBuilder()
-        .setColor(0xFF0000)
-        .setTitle('🏆 Fury Leaderboard Reset')
-        .setDescription('All points reset to 0!')
-        .setFooter({ text:'Fury Management System' })
-        .setTimestamp()
-      ]
-    });
+    await User.updateMany({}, { $set: { total: 0 } });
+    msg.channel.send("✅ All points reset!");
   }
 });
 
-// ----- BUTTON HANDLER -----
+// ===== BUTTON HANDLER =====
 client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isButton()) return;
-  const userId = interaction.user.id;
 
-  if (!data[userId]) data[userId] = { total: 0, active: false, lastClick: 0 };
+  const userId = interaction.user.id;
+  let user = await getUser(userId);
 
   const member = interaction.guild.members.cache.get(userId);
-  const inAssist = member.voice.channelId && ASSIST_CHANNELS.includes(member.voice.channelId);
+  const inAssist = member?.voice.channelId && ASSIST_CHANNELS.includes(member.voice.channelId);
 
-  // Deaf check
-  if (member.voice.selfDeaf) return interaction.reply({ content:'🚫 You are deafened, cannot sign IN.', ephemeral:true });
-  if (!inAssist) return interaction.reply({ content:'❌ You must be in assist VC!', ephemeral:true });
+  if (!inAssist) return interaction.reply({ content: '❌ Join assist VC', ephemeral: true });
 
   if (interaction.customId === 'in') {
-    if (data[userId].active) return interaction.reply({ content:'⚠️ Already signed in!', ephemeral:true });
-    data[userId].active = true;
-    data[userId].lastClick = Date.now();
-    // ✅ DO NOT add points instantly
-    fs.writeFileSync('data.json', JSON.stringify(data,null,2));
-    return interaction.reply({ content:'✅ Signed IN! Timer started.', ephemeral:true });
+    if (user.active) return interaction.reply({ content: '⚠️ Already IN', ephemeral: true });
+
+    user.active = true;
+    user.lastClick = Date.now();
+    await user.save();
+
+    return interaction.reply({ content: '✅ Signed IN', ephemeral: true });
   }
 
   if (interaction.customId === 'out') {
-    if (!data[userId].active) return interaction.reply({ content:'⚠️ Not signed in!', ephemeral:true });
-    data[userId].active = false;
-    data[userId].lastClick = 0;
-    fs.writeFileSync('data.json', JSON.stringify(data,null,2));
-    return interaction.reply({ content:'⛔ Signed OUT!', ephemeral:true });
+    if (!user.active) return interaction.reply({ content: '⚠️ Not IN', ephemeral: true });
+
+    user.active = false;
+    user.lastClick = 0;
+    await user.save();
+
+    return interaction.reply({ content: '⛔ Signed OUT', ephemeral: true });
   }
 });
 
-// ----- TIMER LOOP (every 5 min adds 1 point) -----
+// ===== TIMER LOOP =====
 setInterval(async () => {
   const now = Date.now();
-  for (const userId in data){
-    const user = data[userId];
-    if (!user.active) continue;
+  const users = await User.find({ active: true });
 
-    // Find member
+  for (const user of users) {
     let member = null;
     for (const g of client.guilds.cache.values()) {
-      const m = g.members.cache.get(userId);
-      if (m){member=m; break;}
+      const m = g.members.cache.get(user.userId);
+      if (m) { member = m; break; }
     }
     if (!member || !member.voice.channelId) continue;
-
     const inAssist = ASSIST_CHANNELS.includes(member.voice.channelId);
 
-    // Auto-stop: leave VC, deafen, or 30-min timeout
-    if (!inAssist || member.voice.selfDeaf || now - user.lastClick > 30*60*1000) {
+    if (!inAssist || now - user.lastClick > 30 * 60 * 1000) {
       user.active = false;
       user.lastClick = 0;
-      try{
-        const u = await client.users.fetch(userId);
-        if (!inAssist) await u.send('⛔ You left assist VC. Signed OUT.');
-        else if (member.voice.selfDeaf) await u.send('🚫 You deafened yourself. Signed OUT.');
-        else await u.send('⏰ 30 min passed. Signed OUT.');
-      }catch{}
+      await user.save();
       continue;
     }
 
-    // Add points every 5 min
     user.total += 1;
+    await user.save();
   }
 
-  fs.writeFileSync('data.json', JSON.stringify(data,null,2));
-  console.log('✅ Timer loop ran, data saved.');
-}, 5*60*1000);
+  console.log("✅ Timer loop ran");
+}, 5 * 60 * 1000);
 
-// ----- VOICE STATE UPDATE -----
-client.on('voiceStateUpdate', async (oldState,newState)=>{
-  const userId = oldState.member.id;
-  if (!data[userId] || !data[userId].active) return;
+// ===== VOICE UPDATE =====
+client.on('voiceStateUpdate', async (oldState, newState) => {
+  const member = newState.member || oldState.member;
+  const userId = member.id;
+  let user = await User.findOne({ userId });
+  if (!user?.active) return;
 
-  // Deafened
-  if (!oldState.selfDeaf && newState.selfDeaf){
-    data[userId].active=false;
-    data[userId].lastClick=0;
-    fs.writeFileSync('data.json', JSON.stringify(data,null,2));
-    try{ await oldState.member.send('🚫 You deafened yourself. Signed OUT.'); }catch{}
-  }
-
-  // Left assist VC
-  const leftAssist = oldState.channelId && ASSIST_CHANNELS.includes(oldState.channelId) && (!newState.channelId || !ASSIST_CHANNELS.includes(newState.channelId));
-  if (leftAssist){
-    data[userId].active=false;
-    data[userId].lastClick=0;
-    fs.writeFileSync('data.json', JSON.stringify(data,null,2));
-    try{ await oldState.member.send('⛔ You left assist VC. Signed OUT.'); }catch{}
+  if ((oldState.selfDeaf === false && newState.selfDeaf === true) || newState.selfDeaf) {
+    user.active = false;
+    user.lastClick = 0;
+    await user.save();
+    try { await member.send('🚫 You deafened yourself. Timer stopped and signed OUT.'); } catch {}
   }
 });
 
-// ----- READY -----
-client.once('ready', ()=>{ console.log(`${client.user.tag} is online!`); });
-=======
-require('dotenv').config();
-
-const { 
-  Client, 
-  GatewayIntentBits, 
-  ActionRowBuilder, 
-  ButtonBuilder, 
-  ButtonStyle, 
-  Events, 
-  EmbedBuilder, 
-  AttachmentBuilder 
-} = require('discord.js');
-const fs = require('fs');
-
-const client = new Client({ 
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ] 
+// ===== READY =====
+client.once('clientReady', () => {
+  console.log(`${client.user.tag} is online!`);
 });
 
-const TOKEN = process.env.TOKEN;
-const ASSIST_CHANNELS = process.env.ASSIST_CHANNELS.split(',');
-
-// Ensure data.json exists
-if (!fs.existsSync('data.json')) fs.writeFileSync('data.json', '{}');
-let data = JSON.parse(fs.readFileSync('data.json'));
-
-// Buttons
-const row = new ActionRowBuilder().addComponents(
-  new ButtonBuilder().setCustomId('in').setLabel('IN').setStyle(ButtonStyle.Success),
-  new ButtonBuilder().setCustomId('out').setLabel('OUT').setStyle(ButtonStyle.Danger)
-);
-
-// ----- COMMANDS -----
-client.on('messageCreate', async (msg) => {
-  if (!msg.guild) return;
-
-  // Panel
-  if (msg.content === '!panel') {
-    const file = new AttachmentBuilder('./assets/design.gif');
-    const embed = new EmbedBuilder()
-      .setColor(0x0099FF)
-      .setTitle("Fury Management System")
-      .setDescription("Click (IN) to start the timer. Must click every 30 min. Deafened users cannot click IN.")
-      .setImage('attachment://design.gif')
-      .setFooter({ text: "Fury RP" });
-
-    msg.channel.send({ embeds: [embed], files: [file], components: [row] });
-  }
-
-  // Leaderboard
-  if (msg.content === '!leaderboard') {
-    const sorted = Object.entries(data).sort((a,b)=>b[1].total-a[1].total);
-    let description = sorted.length ? '' : 'No leaderboard data yet!';
-    for (let i=0;i<sorted.length;i++){
-      const userId = sorted[i][0];
-      const points = sorted[i][1].total;
-      description += `**${i+1}.** <@${userId}> — **${points} points**\n`;
-    }
-
-    msg.channel.send({
-      embeds:[new EmbedBuilder()
-        .setColor(0xFFD700)
-        .setTitle('🏆 Fury Leaderboard (1 point = 5min)')
-        .setDescription(description)
-        .setFooter({ text: 'Fury Management System' })
-        .setTimestamp()
-      ]
-    });
-  }
-
-  // Reset points
-  if (msg.content === '!resetpoints') {
-    for (const userId in data) data[userId].total = 0;
-    fs.writeFileSync('data.json', JSON.stringify(data,null,2));
-    msg.channel.send({
-      embeds:[new EmbedBuilder()
-        .setColor(0xFF0000)
-        .setTitle('🏆 Fury Leaderboard Reset')
-        .setDescription('All points reset to 0!')
-        .setFooter({ text:'Fury Management System' })
-        .setTimestamp()
-      ]
-    });
-  }
-});
-
-// ----- BUTTON HANDLER -----
-client.on(Events.InteractionCreate, async interaction => {
-  if (!interaction.isButton()) return;
-  const userId = interaction.user.id;
-
-  if (!data[userId]) data[userId] = { total: 0, active: false, lastClick: 0 };
-
-  const member = interaction.guild.members.cache.get(userId);
-  const inAssist = member.voice.channelId && ASSIST_CHANNELS.includes(member.voice.channelId);
-
-  // Deaf check
-  if (member.voice.selfDeaf) return interaction.reply({ content:'🚫 You are deafened, cannot sign IN.', ephemeral:true });
-  if (!inAssist) return interaction.reply({ content:'❌ You must be in assist VC!', ephemeral:true });
-
-  if (interaction.customId === 'in') {
-    if (data[userId].active) return interaction.reply({ content:'⚠️ Already signed in!', ephemeral:true });
-    data[userId].active = true;
-    data[userId].lastClick = Date.now();
-    // ✅ DO NOT add points instantly
-    fs.writeFileSync('data.json', JSON.stringify(data,null,2));
-    return interaction.reply({ content:'✅ Signed IN! Timer started.', ephemeral:true });
-  }
-
-  if (interaction.customId === 'out') {
-    if (!data[userId].active) return interaction.reply({ content:'⚠️ Not signed in!', ephemeral:true });
-    data[userId].active = false;
-    data[userId].lastClick = 0;
-    fs.writeFileSync('data.json', JSON.stringify(data,null,2));
-    return interaction.reply({ content:'⛔ Signed OUT!', ephemeral:true });
-  }
-});
-
-// ----- TIMER LOOP (every 5 min adds 1 point) -----
-setInterval(async () => {
-  const now = Date.now();
-  for (const userId in data){
-    const user = data[userId];
-    if (!user.active) continue;
-
-    // Find member
-    let member = null;
-    for (const g of client.guilds.cache.values()) {
-      const m = g.members.cache.get(userId);
-      if (m){member=m; break;}
-    }
-    if (!member || !member.voice.channelId) continue;
-
-    const inAssist = ASSIST_CHANNELS.includes(member.voice.channelId);
-
-    // Auto-stop: leave VC, deafen, or 30-min timeout
-    if (!inAssist || member.voice.selfDeaf || now - user.lastClick > 30*60*1000) {
-      user.active = false;
-      user.lastClick = 0;
-      try{
-        const u = await client.users.fetch(userId);
-        if (!inAssist) await u.send('⛔ You left assist VC. Signed OUT.');
-        else if (member.voice.selfDeaf) await u.send('🚫 You deafened yourself. Signed OUT.');
-        else await u.send('⏰ 30 min passed. Signed OUT.');
-      }catch{}
-      continue;
-    }
-
-    // Add points every 5 min
-    user.total += 1;
-  }
-
-  fs.writeFileSync('data.json', JSON.stringify(data,null,2));
-  console.log('✅ Timer loop ran, data saved.');
-}, 5*60*1000);
-
-// ----- VOICE STATE UPDATE -----
-client.on('voiceStateUpdate', async (oldState,newState)=>{
-  const userId = oldState.member.id;
-  if (!data[userId] || !data[userId].active) return;
-
-  // Deafened
-  if (!oldState.selfDeaf && newState.selfDeaf){
-    data[userId].active=false;
-    data[userId].lastClick=0;
-    fs.writeFileSync('data.json', JSON.stringify(data,null,2));
-    try{ await oldState.member.send('🚫 You deafened yourself. Signed OUT.'); }catch{}
-  }
-
-  // Left assist VC
-  const leftAssist = oldState.channelId && ASSIST_CHANNELS.includes(oldState.channelId) && (!newState.channelId || !ASSIST_CHANNELS.includes(newState.channelId));
-  if (leftAssist){
-    data[userId].active=false;
-    data[userId].lastClick=0;
-    fs.writeFileSync('data.json', JSON.stringify(data,null,2));
-    try{ await oldState.member.send('⛔ You left assist VC. Signed OUT.'); }catch{}
-  }
-});
-
-// ----- READY -----
-client.once('ready', ()=>{ console.log(`${client.user.tag} is online!`); });
->>>>>>> 0c09d37c8a774c0826c9f8b8c4c2b90b47ba3d8e
+// ===== LOGIN =====
 client.login(TOKEN);
