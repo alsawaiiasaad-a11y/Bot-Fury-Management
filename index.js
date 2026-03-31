@@ -1,22 +1,33 @@
-// index.js
 require('dotenv').config();
-const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, Events, EmbedBuilder, AttachmentBuilder } = require('discord.js');
+
 const mongoose = require('mongoose');
+const {
+  Client,
+  GatewayIntentBits,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  Events,
+  EmbedBuilder,
+  AttachmentBuilder
+} = require('discord.js');
+
 const fs = require('fs');
 const path = require('path');
 
-// ===== MongoDB Setup =====
+// ===== MongoDB =====
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('✅ MongoDB connected'))
   .catch(err => console.error('❌ MongoDB connection error:', err));
 
-// ===== User Schema =====
+// ===== Schema =====
 const userSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
   total: { type: Number, default: 0 },
   active: { type: Boolean, default: false },
   lastClick: { type: Number, default: 0 }
 });
+
 const User = mongoose.model('User', userSchema);
 
 // ===== Discord Client =====
@@ -39,7 +50,7 @@ const row = new ActionRowBuilder().addComponents(
   new ButtonBuilder().setCustomId('out').setLabel('OUT').setStyle(ButtonStyle.Danger)
 );
 
-// ===== Helper: Get or Create User =====
+// ===== Helper =====
 async function getUser(userId) {
   let user = await User.findOne({ userId });
   if (!user) {
@@ -49,13 +60,21 @@ async function getUser(userId) {
   return user;
 }
 
+function isAdmin(member) {
+  return member.permissions.has('Administrator');
+}
+
 // ===== PANEL =====
 async function sendPanel(channel) {
   try {
     const filePath = path.join(__dirname, 'assets', 'design.gif');
-    if (!fs.existsSync(filePath)) return channel.send("❌ GIF not found");
+
+    if (!fs.existsSync(filePath)) {
+      return channel.send("❌ GIF not found");
+    }
 
     const attachment = new AttachmentBuilder(filePath);
+
     const embed = new EmbedBuilder()
       .setColor(0x0099FF)
       .setTitle("Fury Management System")
@@ -63,7 +82,12 @@ async function sendPanel(channel) {
       .setImage('attachment://design.gif')
       .setFooter({ text: "Fury RP" });
 
-    await channel.send({ embeds: [embed], files: [attachment], components: [row] });
+    await channel.send({
+      embeds: [embed],
+      files: [attachment],
+      components: [row]
+    });
+
   } catch (err) {
     console.error(err);
   }
@@ -73,16 +97,20 @@ async function sendPanel(channel) {
 client.on('messageCreate', async msg => {
   if (!msg.guild || msg.author.bot) return;
 
+  // PANEL
   if (msg.content === '!panel') return sendPanel(msg.channel);
 
+  // LEADERBOARD
   if (msg.content === '!leaderboard') {
-    const users = await User.find().sort({ total: -1 }).limit(50); // top 50
-    let desc = users.length ? '' : 'No leaderboard data yet!';
+    const users = await User.find().sort({ total: -1 });
+
+    let desc = users.length ? '' : 'No data yet';
+
     users.forEach((u, i) => {
       desc += `**${i + 1}.** <@${u.userId}> — **${u.total} points**\n`;
     });
 
-    await msg.channel.send({
+    return msg.channel.send({
       embeds: [
         new EmbedBuilder()
           .setColor(0xFFD700)
@@ -92,13 +120,105 @@ client.on('messageCreate', async msg => {
     });
   }
 
+  // RESET
   if (msg.content === '!resetpoints') {
+    if (!isAdmin(msg.member)) return;
+
     await User.updateMany({}, { $set: { total: 0 } });
-    msg.channel.send("✅ All points reset!");
+    return msg.reply("✅ All points reset!");
+  }
+
+  // ADD POINTS
+  if (msg.content.startsWith('!addpoints')) {
+    if (!isAdmin(msg.member)) return;
+
+    const mention = msg.mentions.users.first();
+    const points = parseInt(msg.content.split(' ')[2]);
+
+    if (!mention || isNaN(points)) {
+      return msg.reply('Usage: !addpoints @user 50');
+    }
+
+    let user = await User.findOne({ userId: mention.id });
+
+    if (!user) {
+      user = new User({ userId: mention.id, total: points });
+    } else {
+      user.total += points;
+    }
+
+    await user.save();
+
+    return msg.reply(`✅ Added ${points} points to <@${mention.id}>`);
+  }
+
+  // REMOVE POINTS
+  if (msg.content.startsWith('!removepoints')) {
+    if (!isAdmin(msg.member)) return;
+
+    const mention = msg.mentions.users.first();
+    const points = parseInt(msg.content.split(' ')[2]);
+
+    if (!mention || isNaN(points)) {
+      return msg.reply('Usage: !removepoints @user 50');
+    }
+
+    let user = await User.findOne({ userId: mention.id });
+
+    if (!user) return msg.reply('❌ User not found');
+
+    user.total = Math.max(0, user.total - points);
+    await user.save();
+
+    return msg.reply(`➖ Removed ${points} points from <@${mention.id}>`);
+  }
+
+  // SET POINTS
+  if (msg.content.startsWith('!setpoints')) {
+    if (!isAdmin(msg.member)) return;
+
+    const mention = msg.mentions.users.first();
+    const points = parseInt(msg.content.split(' ')[2]);
+
+    if (!mention || isNaN(points)) {
+      return msg.reply('Usage: !setpoints @user 50');
+    }
+
+    let user = await User.findOne({ userId: mention.id });
+
+    if (!user) {
+      user = new User({ userId: mention.id, total: points });
+    } else {
+      user.total = points;
+    }
+
+    await user.save();
+
+    return msg.reply(`🎯 Set <@${mention.id}> points to ${points}`);
+  }
+
+  // TOP 10
+  if (msg.content === '!top10') {
+    const users = await User.find().sort({ total: -1 }).limit(10);
+
+    let desc = users.length ? '' : 'No data yet';
+
+    users.forEach((u, i) => {
+      desc += `**${i + 1}.** <@${u.userId}> — **${u.total} points**\n`;
+    });
+
+    return msg.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x00FFAA)
+          .setTitle('🔥 Top 10 Leaderboard')
+          .setDescription(desc)
+      ]
+    });
   }
 });
 
-// ===== BUTTON HANDLER =====
+// ===== BUTTONS =====
 client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isButton()) return;
 
@@ -108,10 +228,14 @@ client.on(Events.InteractionCreate, async interaction => {
   const member = interaction.guild.members.cache.get(userId);
   const inAssist = member?.voice.channelId && ASSIST_CHANNELS.includes(member.voice.channelId);
 
-  if (!inAssist) return interaction.reply({ content: '❌ Join assist VC', ephemeral: true });
+  if (!inAssist) {
+    return interaction.reply({ content: '❌ Join assist VC', ephemeral: true });
+  }
 
   if (interaction.customId === 'in') {
-    if (user.active) return interaction.reply({ content: '⚠️ Already IN', ephemeral: true });
+    if (user.active) {
+      return interaction.reply({ content: '⚠️ Already IN', ephemeral: true });
+    }
 
     user.active = true;
     user.lastClick = Date.now();
@@ -121,7 +245,9 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.customId === 'out') {
-    if (!user.active) return interaction.reply({ content: '⚠️ Not IN', ephemeral: true });
+    if (!user.active) {
+      return interaction.reply({ content: '⚠️ Not IN', ephemeral: true });
+    }
 
     user.active = false;
     user.lastClick = 0;
@@ -131,21 +257,24 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 });
 
-// ===== TIMER LOOP =====
+// ===== TIMER =====
 setInterval(async () => {
   const now = Date.now();
   const users = await User.find({ active: true });
 
   for (const user of users) {
     let member = null;
+
     for (const g of client.guilds.cache.values()) {
       const m = g.members.cache.get(user.userId);
       if (m) { member = m; break; }
     }
+
     if (!member || !member.voice.channelId) continue;
+
     const inAssist = ASSIST_CHANNELS.includes(member.voice.channelId);
 
-    if (!inAssist || now - user.lastClick > 30 * 60 * 1000) {
+    if (!inAssist || member.voice.selfDeaf || now - user.lastClick > 30 * 60 * 1000) {
       user.active = false;
       user.lastClick = 0;
       await user.save();
@@ -158,21 +287,6 @@ setInterval(async () => {
 
   console.log("✅ Timer loop ran");
 }, 5 * 60 * 1000);
-
-// ===== VOICE UPDATE =====
-client.on('voiceStateUpdate', async (oldState, newState) => {
-  const member = newState.member || oldState.member;
-  const userId = member.id;
-  let user = await User.findOne({ userId });
-  if (!user?.active) return;
-
-  if ((oldState.selfDeaf === false && newState.selfDeaf === true) || newState.selfDeaf) {
-    user.active = false;
-    user.lastClick = 0;
-    await user.save();
-    try { await member.send('🚫 You deafened yourself. Timer stopped and signed OUT.'); } catch {}
-  }
-});
 
 // ===== READY =====
 client.once('clientReady', () => {
